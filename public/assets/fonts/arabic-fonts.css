@@ -1,0 +1,11 @@
+/* Arabic display fonts for the Arabic Terminal Report. Each of these font files was supplied
+   directly by the school — see README section on Arabic fonts for licensing notes before
+   using this system commercially at scale. */
+@font-face { font-family: 'Arabic Zawiya'; src: url('/assets/fonts/Arabic_Zawiya.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'Khalid'; src: url('/assets/fonts/Khalid.ttf') format('truetype'); font-display: swap; }
+@font-face { font-family: 'Miqdad'; src: url('/assets/fonts/Miqdad_Personal_Use.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'Keswah'; src: url('/assets/fonts/Keswahpersonaluse.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'Ruhia Arabic'; src: url('/assets/fonts/Ruhia_Arabic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'Tafkir Arabic'; src: url('/assets/fonts/Tafkir_Arabic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'Naveid Arabic'; src: url('/assets/fonts/NaveidArabicDEMO-Regular.otf') format('opentype'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Naveid Arabic'; src: url('/assets/fonts/NaveidArabicDEMO-ExtraBold.otf') format('opentype'); font-weight: 800; font-display: swap; }

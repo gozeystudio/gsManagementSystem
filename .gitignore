@@ -1,0 +1,10 @@
+node_modules/
+data/
+backups/
+certs/
+public/uploads/*
+!public/uploads/.gitkeep
+*.db
+*.sqlite
+*.log
+.DS_Store

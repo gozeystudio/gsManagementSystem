@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>School Check-in Kiosk</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/barcode.js"></script>
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at top, #16345c 0%, #081527 70%);
+    font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px 0;}
+  .kiosk-card{background:rgba(255,255,255,0.97);border-radius:24px;padding:36px 32px;width:380px;max-width:92vw;
+    text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.08);
+    backdrop-filter:blur(10px);position:relative;overflow:hidden;}
+  .kiosk-card::before{content:'';position:absolute;top:0;left:0;right:0;height:6px;
+    background:linear-gradient(90deg,#c8973a,#e8c477,#c8973a);}
+  .kiosk-logo{width:76px;height:76px;border-radius:50%;object-fit:cover;margin-bottom:10px;
+    border:3px solid #c8973a;box-shadow:0 4px 16px rgba(200,151,58,.35);}
+  .kiosk-card h1{font-size:19px;color:#0f2a4a;margin:0 0 2px;font-weight:800;letter-spacing:.2px;}
+  .kiosk-motto{color:#c8973a;font-style:italic;font-size:13px;margin:0 0 20px;}
+  .kiosk-card input{font-size:17px;padding:13px 16px;text-align:center;letter-spacing:.5px;margin-bottom:10px;
+    width:100%;border:1.5px solid #e3e7ee;border-radius:12px;background:#f8f9fb;transition:border-color .15s;}
+  .kiosk-card input:focus{outline:none;border-color:#c8973a;background:#fff;}
+  .kiosk-card button[type=submit], .kiosk-scan-btn{width:100%;background:linear-gradient(135deg,#0f2a4a,#0a1d33);
+    color:#fff;border:none;padding:15px;border-radius:12px;font-weight:700;font-size:16px;cursor:pointer;
+    box-shadow:0 8px 20px rgba(15,42,74,.3);transition:transform .1s;}
+  .kiosk-card button[type=submit]:active, .kiosk-scan-btn:active{transform:scale(.98);}
+  .kiosk-scan-btn{background:linear-gradient(135deg,#c8973a,#a97e28);box-shadow:0 8px 20px rgba(200,151,58,.35);margin-bottom:10px;}
+  .kiosk-result{margin-top:16px;padding:16px;border-radius:14px;font-weight:700;font-size:16px;display:none;}
+  .kiosk-result.success{background:#e3f5ea;color:#1f8a54;display:block;}
+  .kiosk-result.error{background:#fbe6e4;color:#c1372b;display:block;}
+  .kiosk-sub{font-weight:400;font-size:13px;margin-top:4px;color:#6b7684;}
+  .kiosk-clock{color:#6b7684;font-size:13px;margin-bottom:16px;font-variant-numeric:tabular-nums;}
+  .kiosk-summary{display:flex;justify-content:center;gap:14px;margin-top:16px;padding-top:16px;
+    border-top:1px solid #eef1f6;font-size:11.5px;color:#6b7684;flex-wrap:wrap;}
+  .kiosk-summary b{display:block;font-size:16px;color:#0f2a4a;}
+  .kiosk-camera-box{width:100%;aspect-ratio:4/3;border-radius:14px;overflow:hidden;background:#0f2a4a;margin-bottom:12px;
+    position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.1);}
+  .kiosk-camera-box video{width:100%;height:100%;object-fit:cover;}
+  .kiosk-camera-box video.mirrored{transform:scaleX(-1);}
+  .kiosk-camera-status{position:absolute;bottom:6px;left:0;right:0;text-align:center;color:#fff;font-size:11px;background:rgba(0,0,0,.5);padding:4px 0;}
+  .kiosk-camera-switch{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.5);border:none;color:#fff;width:36px;height:36px;
+    border-radius:50%;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0 !important;}
+  .kiosk-scan-guide{position:absolute;inset:20% 8%;border:2px dashed rgba(200,151,58,.8);border-radius:8px;pointer-events:none;}
+  .kiosk-captured-thumb{width:56px;height:68px;border-radius:6px;object-fit:cover;margin-top:8px;border:2px solid #1f8a54;}
+  .kiosk-tabs{display:flex;gap:6px;margin-bottom:16px;background:#f2f4f7;padding:5px;border-radius:14px;}
+  .kiosk-tab{flex:1;padding:9px 4px;border-radius:10px;border:none;background:none;color:#6b7684;font-weight:700;
+    font-size:12.5px;cursor:pointer;transition:all .15s;}
+  .kiosk-tab.active{background:#fff;color:#0f2a4a;box-shadow:0 2px 8px rgba(15,42,74,.15);}
+  .kiosk-scan-hint{font-size:12px;color:#6b7684;margin:-4px 0 12px;}
+</style>
+</head>
+<body>
+  <div class="kiosk-card">
+    <img class="kiosk-logo" id="kiosk-logo" src="/assets/logo.png" alt="">
+    <h1 id="kiosk-school-name">Nibras Educational Complex</h1>
+    <p class="kiosk-motto" id="kiosk-motto">"Knowledge is Light"</p>
+    <div class="kiosk-clock" id="kiosk-clock"></div>
+    <div class="kiosk-tabs">
+      <button type="button" class="kiosk-tab active" id="kiosk-tab-staff">Staff</button>
+      <button type="button" class="kiosk-tab" id="kiosk-tab-student">Student</button>
+      <button type="button" class="kiosk-tab" id="kiosk-tab-visitor">Non-Staff</button>
+    </div>
+    <div class="kiosk-camera-box">
+      <video id="kiosk-video" autoplay playsinline muted></video>
+      <div class="kiosk-scan-guide" id="kiosk-scan-guide" style="display:none"></div>
+      <div class="kiosk-camera-status" id="kiosk-camera-status">Starting camera...</div>
+      <button type="button" class="kiosk-camera-switch" id="kiosk-camera-switch" title="Switch front/back camera" style="display:none">R</button>
+    </div>
+    <canvas id="kiosk-canvas" style="display:none"></canvas>
+    <form id="kiosk-form">
+      <input type="text" id="kiosk-staffid" placeholder="Staff ID (e.g. ST/2026/001)" autocomplete="off" required>
+      <input type="password" id="kiosk-pin" placeholder="PIN" inputmode="numeric" maxlength="6" autocomplete="off" required>
+      <button type="submit">Check In / Out</button>
+    </form>
+    <div id="kiosk-student-panel" style="display:none">
+      <p class="kiosk-scan-hint">Hold your Student ID card's barcode up to the camera, then tap Scan.</p>
+      <button type="button" class="kiosk-scan-btn" id="kiosk-scan-btn">Scan Barcode</button>
+      <form id="kiosk-student-form">
+        <input type="text" id="kiosk-student-id" placeholder="Or type Student ID (e.g. NIB/2026/001)" autocomplete="off" required>
+        <button type="submit">Check In / Out</button>
+      </form>
+    </div>
+    <form id="kiosk-visitor-form" style="display:none">
+      <input type="text" id="kiosk-visitor-name" placeholder="Your full name" autocomplete="off" required>
+      <input type="text" id="kiosk-visitor-purpose" placeholder="Purpose of visit (optional)" autocomplete="off">
+      <button type="submit">Check In / Out</button>
+    </form>
+    <div class="kiosk-result" id="kiosk-result"></div>
+    <div class="kiosk-summary" id="kiosk-summary"></div>
+  </div>
+<script>
+  fetch('/api/public-settings').then(r => r.json()).then(s => {
+    if (s.school_name) document.getElementById('kiosk-school-name').textContent = s.school_name;
+    if (s.motto) document.getElementById('kiosk-motto').textContent = '"' + s.motto + '"';
+    if (s.logo_photo) document.getElementById('kiosk-logo').src = '/uploads/' + encodeURIComponent(s.logo_photo);
+  }).catch(() => {});
+
+  function updateClock() {
+    document.getElementById('kiosk-clock').textContent = new Date().toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  function loadSummary() {
+    fetch('/api/checkin-summary').then(r => r.json()).then(d => {
+      document.getElementById('kiosk-summary').innerHTML =
+        '<div><b>' + d.teachers.checked_in + '</b>Teachers In</div>' +
+        '<div><b>' + d.staff.checked_in + '</b>Staff In</div>' +
+        '<div><b>' + (d.students ? d.students.checked_in : 0) + '</b>Students In</div>' +
+        '<div><b>' + (d.non_staff ? d.non_staff.checked_in : 0) + '</b>Non-Staff In</div>';
+    }).catch(() => {});
+  }
+  loadSummary();
+  setInterval(loadSummary, 20000);
+
+  const staffForm = document.getElementById('kiosk-form');
+  const studentPanel = document.getElementById('kiosk-student-panel');
+  const visitorForm = document.getElementById('kiosk-visitor-form');
+  const scanGuide = document.getElementById('kiosk-scan-guide');
+  function showPanel(which) {
+    document.querySelectorAll('.kiosk-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('kiosk-tab-' + which).classList.add('active');
+    staffForm.style.display = which === 'staff' ? 'block' : 'none';
+    studentPanel.style.display = which === 'student' ? 'block' : 'none';
+    visitorForm.style.display = which === 'visitor' ? 'block' : 'none';
+    scanGuide.style.display = which === 'student' ? 'block' : 'none';
+  }
+  document.getElementById('kiosk-tab-staff').addEventListener('click', () => showPanel('staff'));
+  document.getElementById('kiosk-tab-student').addEventListener('click', () => showPanel('student'));
+  document.getElementById('kiosk-tab-visitor').addEventListener('click', () => showPanel('visitor'));
+
+  const video = document.getElementById('kiosk-video');
+  const cameraStatus = document.getElementById('kiosk-camera-status');
+  const switchBtn = document.getElementById('kiosk-camera-switch');
+  let cameraReady = false;
+  let currentFacingMode = 'user';
+  let currentStream = null;
+
+  async function startCamera(facingMode) {
+    // On a phone (or any device other than the one running the server), the camera will only
+    // ever work over HTTPS or from "localhost" itself — this is a browser security rule with
+    // no code-level workaround, so detect it specifically and say so clearly rather than a
+    // generic "camera unavailable" that gives no hint of what's actually wrong or how to fix it.
+    if (!window.isSecureContext) {
+      cameraStatus.style.display = 'block';
+      cameraStatus.textContent = 'Camera needs the secure address — open https:// (not http://) on this device, or ask the school office for the "Scan to Check In" QR sign, which uses the correct address automatically. You can also use the PIN/manual check-in below.';
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      cameraStatus.textContent = 'Camera not supported on this device.';
+      return;
+    }
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+    cameraReady = false;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facingMode } }, audio: false });
+      currentStream = stream;
+      video.srcObject = stream;
+      video.classList.toggle('mirrored', facingMode === 'user');
+      cameraReady = true;
+      cameraStatus.style.display = 'none';
+      currentFacingMode = facingMode;
+      if (navigator.mediaDevices.enumerateDevices) {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (devices.filter(d => d.kind === 'videoinput').length > 1) switchBtn.style.display = 'flex';
+      }
+    } catch (err) {
+      cameraStatus.style.display = 'block';
+      cameraStatus.textContent = 'Camera unavailable - check-in will proceed without a photo.';
+    }
+  }
+  startCamera('user');
+  switchBtn.addEventListener('click', () => startCamera(currentFacingMode === 'user' ? 'environment' : 'user'));
+
+  function captureFrame() {
+    if (!cameraReady || !video.videoWidth) return null;
+    const canvas = document.getElementById('kiosk-canvas');
+    const targetW = 400, targetH = 480;
+    canvas.width = targetW; canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const targetRatio = targetW / targetH, srcRatio = vw / vh;
+    let sx, sy, sw, sh;
+    if (srcRatio > targetRatio) { sh = vh; sw = vh * targetRatio; sx = (vw - sw) / 2; sy = 0; }
+    else { sw = vw; sh = vw / targetRatio; sx = 0; sy = (vh - sh) / 2; }
+    if (currentFacingMode === 'user') { ctx.translate(targetW, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    return canvas.toDataURL('image/jpeg', 0.8);
+  }
+
+  function captureFrameForDecode() {
+    if (!cameraReady || !video.videoWidth) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (currentFacingMode === 'user') { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, 0, 0);
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  document.getElementById('kiosk-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const staffIdText = document.getElementById('kiosk-staffid').value.trim();
+    const pin = document.getElementById('kiosk-pin').value.trim();
+    const resultEl = document.getElementById('kiosk-result');
+    resultEl.className = 'kiosk-result';
+    resultEl.textContent = '';
+    const photoData = captureFrame();
+    try {
+      const res = await fetch('/api/checkin/pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staff_id_text: staffIdText, pin, photo_data: photoData }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+      let msg = '', sub = '';
+      if (data.action === 'checked_in') { msg = 'Welcome, ' + data.name + '!'; sub = 'Checked in at ' + data.time; }
+      else if (data.action === 'checked_out') { msg = 'See you, ' + data.name + '!'; sub = 'Checked in ' + data.checkInTime + ' - Checked out ' + data.time; }
+      else { msg = data.name; sub = 'Already checked in and out today.'; }
+      resultEl.className = 'kiosk-result success';
+      resultEl.innerHTML = msg + '<div class="kiosk-sub">' + sub + '</div>' + (photoData ? '<img class="kiosk-captured-thumb" src="' + photoData + '" alt="">' : '');
+      document.getElementById('kiosk-form').reset();
+      loadSummary();
+    } catch (err) {
+      resultEl.className = 'kiosk-result error';
+      resultEl.textContent = err.message;
+    }
+    setTimeout(() => { resultEl.className = 'kiosk-result'; resultEl.innerHTML = ''; }, 6000);
+  });
+
+  async function doStudentCheckin(studentIdText) {
+    const resultEl = document.getElementById('kiosk-result');
+    resultEl.className = 'kiosk-result';
+    resultEl.textContent = '';
+    const photoData = captureFrame();
+    try {
+      const res = await fetch('/api/checkin/student', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ student_id_text: studentIdText, photo_data: photoData }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+      let msg = '', sub = '';
+      if (data.action === 'checked_in') { msg = 'Welcome, ' + data.name + '!'; sub = 'Checked in at ' + data.time; }
+      else if (data.action === 'checked_out') { msg = 'See you, ' + data.name + '!'; sub = 'Checked in ' + data.checkInTime + ' - Checked out ' + data.time; }
+      else { msg = data.name; sub = 'Already checked in and out today.'; }
+      resultEl.className = 'kiosk-result success';
+      resultEl.innerHTML = msg + '<div class="kiosk-sub">' + sub + '</div>' + (photoData ? '<img class="kiosk-captured-thumb" src="' + photoData + '" alt="">' : '');
+      document.getElementById('kiosk-student-form').reset();
+      loadSummary();
+    } catch (err) {
+      resultEl.className = 'kiosk-result error';
+      resultEl.textContent = err.message;
+    }
+    setTimeout(() => { resultEl.className = 'kiosk-result'; resultEl.innerHTML = ''; }, 6000);
+  }
+
+  document.getElementById('kiosk-student-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    doStudentCheckin(document.getElementById('kiosk-student-id').value.trim());
+  });
+
+  document.getElementById('kiosk-scan-btn').addEventListener('click', () => {
+    const resultEl = document.getElementById('kiosk-result');
+    const imageData = captureFrameForDecode();
+    if (!imageData) {
+      resultEl.className = 'kiosk-result error';
+      resultEl.textContent = 'Camera not ready yet - try again in a moment.';
+      setTimeout(() => { resultEl.className = 'kiosk-result'; resultEl.innerHTML = ''; }, 4000);
+      return;
+    }
+    const decoded = decodeBarcodeFromImageData(imageData.data, imageData.width, imageData.height);
+    if (!decoded) {
+      resultEl.className = 'kiosk-result error';
+      resultEl.textContent = 'Could not read a barcode - hold the card steady, well-lit, and try again.';
+      setTimeout(() => { resultEl.className = 'kiosk-result'; resultEl.innerHTML = ''; }, 5000);
+      return;
+    }
+    doStudentCheckin(decoded);
+  });
+
+  document.getElementById('kiosk-visitor-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fullName = document.getElementById('kiosk-visitor-name').value.trim();
+    const purpose = document.getElementById('kiosk-visitor-purpose').value.trim();
+    const resultEl = document.getElementById('kiosk-result');
+    resultEl.className = 'kiosk-result';
+    resultEl.textContent = '';
+    const photoData = captureFrame();
+    try {
+      const res = await fetch('/api/checkin/visitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ full_name: fullName, purpose, photo_data: photoData }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+      const msg = data.action === 'checked_in' ? 'Welcome, ' + data.name + '!' : 'See you, ' + data.name + '!';
+      const sub = data.action === 'checked_in' ? 'Checked in - please sign in with the office if needed.' : 'Checked out. Thank you for visiting!';
+      resultEl.className = 'kiosk-result success';
+      resultEl.innerHTML = msg + '<div class="kiosk-sub">' + sub + '</div>' + (photoData ? '<img class="kiosk-captured-thumb" src="' + photoData + '" alt="">' : '');
+      document.getElementById('kiosk-visitor-form').reset();
+      loadSummary();
+    } catch (err) {
+      resultEl.className = 'kiosk-result error';
+      resultEl.textContent = err.message;
+    }
+    setTimeout(() => { resultEl.className = 'kiosk-result'; resultEl.innerHTML = ''; }, 6000);
+  });
+</script>
+</body>
+</html>

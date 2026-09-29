@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nibras Educational Complex — School Management System</title>
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/assets/fonts/arabic-fonts.css">
+</head>
+<body>
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand">
+        <img class="crest" id="login-crest" src="/assets/logo.png" alt="School logo">
+        <h1 id="login-school-name">Nibras Educational Complex</h1>
+        <p class="motto" id="login-motto">"Knowledge is Light"</p>
+      </div>
+      <form id="login-form">
+        <label id="login-username-label">Username</label>
+        <input type="text" id="login-username" autocomplete="username" required />
+        <label id="login-password-label">Password</label>
+        <input type="password" id="login-password" autocomplete="current-password" required />
+        <div id="login-error" class="error-text"></div>
+        <button type="submit" id="login-submit-btn">Sign In</button>
+      </form>
+      <p class="login-hint">Default: admin / Admin@123 — please change after first login.</p>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+    <div id="staff-profile-backdrop" class="staff-profile-backdrop"></div>
+    <aside id="staff-profile-panel" class="staff-profile-panel"></aside>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <img class="crest small" id="sidebar-crest" src="/assets/logo.png" alt="School logo">
+        <div>
+          <div class="brand-name" id="sidebar-school-name">Nibras Educational Complex</div>
+          <div class="brand-motto" id="sidebar-motto">"Knowledge is Light"</div>
+        </div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="dev-credit">
+        <div class="dev-credit-powered">Powered by <a href="https://www.tiktok.com/@gozeystudio" target="_blank" rel="noopener" class="dev-credit-link"><b>Gozey Studio</b></a></div>
+        <div class="dev-credit-name">Developed by Mim Gozey</div>
+        <div class="dev-credit-contact">+233 24 704 2952 &middot; +233 24 448 4705</div>
+        <div class="dev-credit-contact">Gozeystudio@gmail.com</div>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="hamburger-btn" class="hamburger-btn" aria-label="Menu">☰</button>
+          <button id="sidebar-collapse-btn" class="sidebar-collapse-btn" aria-label="Hide menu" title="Hide menu — get more room to work">
+            <svg viewBox="0 0 20 20" width="16" height="16"><path d="M3 4h14v1.5H3V4zm0 5.25h14v1.5H3v-1.5zM3 14.5h14V16H3v-1.5z" fill="currentColor"/></svg>
+          </button>
+          <span id="tb-year"></span> &middot; <span id="tb-term"></span>
+        </div>
+        <div class="topbar-search">
+          <input type="text" id="global-search-input" placeholder="Search students, teachers, staff… (name, DOB, phone, ID)" autocomplete="off">
+          <div id="global-search-results"></div>
+        </div>
+        <div class="topbar-right">
+          <select id="topbar-language-switcher" title="Language"></select>
+          <button id="screen-lock-btn" class="link-btn hidden" title="Lock the screen">🔒 Lock</button>
+          <div class="notif-bell-wrap">
+            <button id="notif-bell-btn" class="notif-bell-btn" title="Notifications" aria-label="Notifications">
+              🔔<span id="notif-bell-badge" class="notif-bell-badge hidden">0</span>
+            </button>
+            <div id="notif-bell-dropdown" class="notif-bell-dropdown hidden"></div>
+          </div>
+          <img id="tb-user-photo" class="tb-user-photo hidden" alt="">
+          <span id="tb-user"></span>
+          <button id="logout-btn" class="link-btn">Logout</button>
+        </div>
+      </header>
+      <main id="content" class="content"></main>
+    </div>
+  </div>
+  <div id="screen-lock-overlay" class="screen-lock-overlay hidden">
+    <div class="screen-lock-card">
+      <div class="screen-lock-icon">🔒</div>
+      <h2>Screen Locked</h2>
+      <p class="small-text">Enter the PIN to continue.</p>
+      <input type="password" id="screen-lock-pin-input" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="off">
+      <button type="button" class="btn gold" id="screen-lock-unlock-btn" style="width:100%;margin-top:12px">Unlock</button>
+      <p id="screen-lock-error" class="small-text" style="color:#ff6b6b"></p>
+    </div>
+  </div>
+
+<script src="/qrencode.js"></script>
+<script src="/barcode.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
