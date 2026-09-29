@@ -1,0 +1,29 @@
+# Render.com deploy blueprint for the Nibras Educational Complex School Management System.
+#
+# What this does: runs the exact same Node.js app used offline, but on Render's servers with
+# a persistent disk so the database, uploaded photos, and backups survive restarts/redeploys.
+# See ONLINE_DEPLOYMENT.md in this repo for the click-by-click setup steps.
+#
+# Note: Render's FREE web service tier does NOT support a persistent disk — data would be wiped
+# every time the service restarts or spins down from inactivity. This blueprint uses the paid
+# "starter" plan specifically so a school's real data (student records, fees, attendance) is not
+# lost. See ONLINE_DEPLOYMENT.md for current pricing.
+services:
+  - type: web
+    name: nibras-school-system
+    runtime: node
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: "npm install --omit=dev"
+    startCommand: "node server.js"
+    healthCheckPath: /
+    autoDeployTrigger: commit
+    disk:
+      name: nibras-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: NODE_VERSION
+        value: 22.22.2

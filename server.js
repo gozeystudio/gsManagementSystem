@@ -15,9 +15,13 @@ const { sendBackupEmail } = require('./mailer.js');
 const PORT = process.env.PORT || 3000;
 const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const UPLOADS_DIR = path.join(PUBLIC_DIR, 'uploads');
+// DATA_DIR lets a cloud host point uploads/backups/certs at a persistent disk mounted outside
+// the app folder (e.g. Render's disk), so they survive redeploys instead of being wiped along
+// with the rest of the container filesystem. Left unset, everything stays exactly where the
+// offline Windows install has always kept it (uploads inside public/, backups next to the app).
+const UPLOADS_DIR = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'uploads') : path.join(PUBLIC_DIR, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-const DEFAULT_BACKUP_DIR = path.join(__dirname, 'backups');
+const DEFAULT_BACKUP_DIR = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'backups') : path.join(__dirname, 'backups');
 if (!fs.existsSync(DEFAULT_BACKUP_DIR)) fs.mkdirSync(DEFAULT_BACKUP_DIR, { recursive: true });
 // Where backups are actually written — the default "backups" folder next to the app unless the
 // admin has set a custom location (e.g. a USB drive or a separate backup disk) in Settings the
@@ -800,6 +804,18 @@ function readBody(req) {
 const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 
 function serveStatic(req, res, pathname) {
+  // Uploads may live outside PUBLIC_DIR (see UPLOADS_DIR above, when DATA_DIR points at a
+  // persistent disk), so they're resolved against UPLOADS_DIR directly rather than PUBLIC_DIR.
+  if (pathname.startsWith('/uploads/')) {
+    const uploadPath = path.join(UPLOADS_DIR, pathname.slice('/uploads/'.length));
+    if (!uploadPath.startsWith(UPLOADS_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
+    return fs.readFile(uploadPath, (err, data) => {
+      if (err) { res.writeHead(404); return res.end('Not found'); }
+      const ext = path.extname(uploadPath);
+      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+      res.end(data);
+    });
+  }
   let filePath = path.join(PUBLIC_DIR, pathname === '/' ? '/index.html' : pathname);
   if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.readFile(filePath, (err, data) => {

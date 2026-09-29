@@ -6,7 +6,11 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 
-const DB_DIR = path.join(__dirname, 'data');
+// DATA_DIR lets a cloud host point the database at a persistent disk (e.g. Render's mounted
+// volume) so it survives redeploys; unset, it defaults to the same local ./data folder the
+// offline Windows install has always used, so nothing changes for that setup.
+const DATA_ROOT = process.env.DATA_DIR || __dirname;
+const DB_DIR = path.join(DATA_ROOT, 'data');
 const DB_PATH = path.join(DB_DIR, 'nibras.db');
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 

@@ -1653,7 +1653,46 @@ generated an actual printed Arabic report, confirmed via the browser's own compu
 the custom font was genuinely the active font — not silently falling back — and visually
 confirmed it was actually rendering in the output.
 
-## 52. Large features not yet built
+## 52. Pushed to GitHub, and Made Deployable Online
+
+### GitHub
+The project is now under version control and pushed to
+[github.com/gozeystudio/gsManagementSystem](https://github.com/gozeystudio/gsManagementSystem)
+(the originally-requested `SchoolManagmentSystem_Online` repo wasn't reachable from this session —
+neither in the connected-repo list nor at its GitHub URL — so, after checking with you, this repo
+was used instead). Added a `.gitignore` so the database file, uploaded photos, TLS certs, and
+backups never get committed — only the application code does.
+
+### Online hosting — without breaking the offline install
+Requested next: a live, shared web link, not just a code repository. That's a real architectural
+question for an app that was deliberately built to keep a school's data on a local machine and
+never touch the internet — so before building anything, flagged the tradeoffs plainly (this
+system holds children's and families' personal data; the default admin password is printed to
+the console, harmless on an offline LAN PC, not harmless in public) and got an explicit answer on
+hosting choice, access model, and whether to harden the login first.
+
+Made the codebase deployable to a real cloud host (Render) *without changing offline behavior at
+all*: the database, upload, and backup folders now read an optional `DATA_DIR` environment
+variable — unset (the offline install's case), everything stays exactly where it always was;
+set (Render's case), they redirect to a mounted persistent disk so data survives restarts and
+redeploys. Also fixed static file serving so uploaded photos still resolve correctly at `/uploads/`
+when that folder lives outside `public/` on a persistent disk, with the same path-traversal guard
+verified against the *raw*, unnormalized request path (curl normalizes `../` by default, which
+first gave a false "safe" result — caught by re-testing with `--path-as-is`).
+
+Added `render.yaml` (a Render Blueprint — the exact plan, region, persistent disk, and start
+command, so deployment is "connect the repo and click Apply" rather than manual dashboard
+clicking) and `ONLINE_DEPLOYMENT.md` (plain-language, step-by-step setup instructions, and the
+actual current cost — Render's free tier has no persistent disk, so this is a real ≈$7.25/month,
+not free; that's stated outright rather than glossed over).
+
+Verified before pushing: full syntax check, then three separate live smoke tests — default
+(offline-equivalent) mode, cloud mode with `DATA_DIR` pointed at a stand-in "persistent disk"
+directory (confirmed the repo's own `data/` folder was untouched and the stand-in disk was used
+instead), and an actual file round-trip through the new `/uploads/` serving path, including the
+traversal-guard re-check above.
+
+## 53. Large features not yet built
 
 A few requested features are substantial standalone modules that deserve a proper, dedicated
 build rather than being rushed in alongside everything else. These are not started:
