@@ -1692,7 +1692,49 @@ directory (confirmed the repo's own `data/` folder was untouched and the stand-i
 instead), and an actual file round-trip through the new `/uploads/` serving path, including the
 traversal-guard re-check above.
 
-## 53. Large features not yet built
+## 54. Started Converting the Online Deployment to Supabase/Postgres: Authentication
+
+Continuing the multi-school Supabase migration tracked in `SUPABASE_MIGRATION.md` (schema and
+the `db-postgres.js` data-access layer were already in place). Before touching any code, measured
+the actual remaining scope precisely rather than guessing: 448 separate `db.prepare(...)` calls
+across ~120 API endpoints in `server.js`, all currently synchronous SQLite — a genuinely large,
+multi-session engineering job, not something to rush through in one pass, especially since one
+mistake in the `school_id` scoping added to each query is exactly how one school could end up
+seeing another school's data. Flagged this plainly and confirmed the plan (module by module,
+starting with authentication) before proceeding.
+
+- **Wired the runtime switch**: `server.js` now loads `db-postgres.js` only when `DATABASE_URL`
+  is set (`USE_POSTGRES`); unset, every line behaves exactly as before — verified live, not just
+  by inspection (logged in, fetched settings, fetched public-settings, all unchanged with no
+  `DATABASE_URL`).
+- **Converted authentication end-to-end**: login, logout, session → current-user resolution, and
+  the public branding endpoint the login screen reads before anyone signs in. Sessions now carry
+  a `schoolId` alongside the `userId` they always carried.
+- **Added school resolution for pre-login requests** (`resolveSchoolPg`): an explicit slug, or —
+  so a single-school Supabase deployment needs zero frontend changes — automatic detection when
+  exactly one school exists so far.
+- **Added a safety net for everything not yet converted**: rather than let an unconverted endpoint
+  silently run against the local, unused SQLite database and return empty or wrong data once
+  `DATABASE_URL` is set — which would look like a data bug, not a missing feature — every `/api/`
+  route past login now returns a clear `501` pointing at `SUPABASE_MIGRATION.md` until it's
+  actually converted. Verified this doesn't fire at all when `DATABASE_URL` is unset.
+- **Re-verified the live Supabase schema** (still matches `001_schema.sql`, 68 tables) and
+  re-ran `createSchool()`'s full statement sequence directly against it inside a transaction that
+  was then rolled back — confirmed clean, confirmed nothing persisted.
+- **Found and flagged a real security gap**: Supabase's advisor shows all 68 tables are exposed
+  to anyone with the project's (non-secret) anon key via Supabase's auto-generated REST API. This
+  app never uses that API (it connects to Postgres directly, server-side), so enabling Row Level
+  Security with no policies would close this off with zero effect on the app — but that's a
+  decision for the school to make explicitly, so it's documented with the exact fix rather than
+  silently applied.
+
+Honest state of things: authentication works against Postgres (schema- and logic-verified, not
+yet exercised against a real `pg` connection over HTTP — this sandbox can't install `pg` or reach
+Postgres directly, same blocker noted in `SUPABASE_MIGRATION.md`). Every other endpoint still
+needs converting, in the order laid out there. The offline install and the existing SQLite-backed
+Render deployment are both completely unaffected either way.
+
+## 55. Large features not yet built
 
 A few requested features are substantial standalone modules that deserve a proper, dedicated
 build rather than being rushed in alongside everything else. These are not started:

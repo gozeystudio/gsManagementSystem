@@ -11,6 +11,34 @@ const zlib = require('node:zlib');
 const os = require('node:os');
 const { db, DB_PATH, DB_DIR, hashPassword, verifyPassword, logAudit, generateSequentialId, getOrCreateCheckinCredential, generateUnlockToken } = require('./db.js');
 const { sendBackupEmail } = require('./mailer.js');
+// Online-only Postgres/Supabase backend (see SUPABASE_MIGRATION.md) — loaded only when
+// DATABASE_URL is set. The offline install never sets this, so `dbpg` stays null and every line
+// below that checks USE_POSTGRES takes the original SQLite path, completely unchanged.
+// Migration status: authentication, session/currentUser resolution, and public branding now run
+// against Postgres when enabled. Most other endpoints below are NOT yet converted — see
+// SUPABASE_MIGRATION.md for exactly which ones and the plan for the rest.
+const dbpg = process.env.DATABASE_URL ? require('./db-postgres.js') : null;
+const USE_POSTGRES = !!dbpg;
+// Resolves which school a pre-login request is for: an explicit slug (from ?school= or the
+// login form) if given, otherwise the one school in the database if this deployment only has
+// one yet — so a single-school Supabase deployment works with no frontend changes, while a
+// multi-school deployment works once the slug is passed through.
+async function resolveSchoolPg(explicitSlug) {
+  if (explicitSlug) return dbpg.getSchoolBySlug(explicitSlug);
+  const { rows } = await dbpg.query('SELECT id, slug, name FROM schools', []);
+  return rows.length === 1 ? rows[0] : null;
+}
+async function getUserByIdPg(schoolId, id) {
+  const { rows } = await dbpg.query(
+    `SELECT u.*, r.name as role_name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = $1 AND u.school_id = $2`,
+    [id, schoolId]
+  );
+  return rows[0] || null;
+}
+async function getPermissionsPg(schoolId, roleId, moduleName) {
+  const { rows } = await dbpg.query('SELECT * FROM role_permissions WHERE school_id=$1 AND role_id=$2 AND module=$3', [schoolId, roleId, moduleName]);
+  return rows[0] || { can_view: 0, can_add: 0, can_edit: 0, can_delete: 0, can_export: 0 };
+}
 
 const PORT = process.env.PORT || 3000;
 const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
@@ -336,12 +364,12 @@ async function checkWeeklyBackupEmail() {
 }
 
 // ---------- Sessions (in-memory) ----------
-const sessions = new Map(); // token -> { userId, expires }
+const sessions = new Map(); // token -> { userId, schoolId, expires }
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
 
-function createSession(userId) {
+function createSession(userId, schoolId) {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { userId, expires: Date.now() + SESSION_TTL_MS });
+  sessions.set(token, { userId, schoolId: schoolId || null, expires: Date.now() + SESSION_TTL_MS });
   return token;
 }
 function getSession(token) {
@@ -986,10 +1014,25 @@ const server = http.createServer(async (req, res) => {
     // Auth
     const cookies = parseCookies(req);
     const session = cookies.nibras_session ? getSession(cookies.nibras_session) : null;
-    const currentUser = session ? getUserById(session.userId) : null;
+    const currentUser = session ? (USE_POSTGRES ? await getUserByIdPg(session.schoolId, session.userId) : getUserById(session.userId)) : null;
 
     if (pathname === '/api/login' && req.method === 'POST') {
       const body = await readBody(req);
+      if (USE_POSTGRES) {
+        const school = await resolveSchoolPg((body.school || '').trim().toLowerCase());
+        if (!school) return sendJSON(res, 400, { error: 'Which school is this login for? Pass "school" (its slug) with the request.' });
+        const { rows } = await dbpg.query('SELECT * FROM users WHERE school_id=$1 AND username=$2', [school.id, (body.username || '').trim()]);
+        const user = rows[0];
+        if (!user || user.status !== 'Active' || !verifyPassword(body.password || '', user.password_salt, user.password_hash)) {
+          await dbpg.logAudit(school.id, null, 'Failed login attempt', 'auth', { username: body.username });
+          return sendJSON(res, 401, { error: 'Invalid username or password' });
+        }
+        const token = createSession(user.id, school.id);
+        await dbpg.logAudit(school.id, user, 'Login', 'auth', {});
+        res.setHeader('Set-Cookie', `nibras_session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_MS / 1000}; SameSite=Strict`);
+        const { rows: roleRows } = await dbpg.query('SELECT name FROM roles WHERE id=$1', [user.role_id]);
+        return sendJSON(res, 200, { id: user.id, username: user.username, full_name: user.full_name, role: roleRows[0].name, role_id: user.role_id, school: school.slug });
+      }
       const user = db.prepare('SELECT * FROM users WHERE username=?').get((body.username || '').trim());
       if (!user || user.status !== 'Active' || !verifyPassword(body.password || '', user.password_salt, user.password_hash)) {
         logAudit(null, 'Failed login attempt', 'auth', { username: body.username });
@@ -1003,18 +1046,41 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/logout' && req.method === 'POST') {
+      if (currentUser) {
+        if (USE_POSTGRES) await dbpg.logAudit(session.schoolId, currentUser, 'Logout', 'auth', {});
+        else logAudit(currentUser, 'Logout', 'auth', {});
+      }
       if (cookies.nibras_session) sessions.delete(cookies.nibras_session);
-      if (currentUser) logAudit(currentUser, 'Logout', 'auth', {});
       res.setHeader('Set-Cookie', 'nibras_session=; HttpOnly; Path=/; Max-Age=0');
       return sendJSON(res, 200, { ok: true });
     }
 
     // Public branding (no login required) — lets the login screen show the school's own
     // name/motto/logo instead of hardcoded defaults, without exposing any private settings.
+    // In Postgres mode, which school is resolved via resolveSchoolPg (see its comment above).
     if (pathname === '/api/public-settings' && req.method === 'GET') {
+      if (USE_POSTGRES) {
+        const school = await resolveSchoolPg((parsed.query.school || '').toString().trim().toLowerCase());
+        if (!school) return sendJSON(res, 400, { error: 'Which school? Pass ?school=<slug> (this deployment has more than one school and none was given).' });
+        const { rows } = await dbpg.query(`SELECT school_name, motto, logo_photo, login_background, nav_theme, page_theme, nav_font_size, cursor_style, arabic_report_font, ui_font_scale, custom_accent_color, custom_bg_color FROM school_settings WHERE school_id=$1`, [school.id]);
+        return sendJSON(res, 200, { ...(rows[0] || {}), school_slug: school.slug });
+      }
       const s = db.prepare('SELECT school_name, motto, logo_photo, login_background, nav_theme, page_theme, nav_font_size, cursor_style, arabic_report_font, ui_font_scale, custom_accent_color, custom_bg_color FROM school_settings WHERE id=1').get();
       return sendJSON(res, 200, s || {});
     }
+
+    // ---- Postgres-mode safety net ----
+    // Everything above this point (login, logout, public-settings, currentUser resolution) is
+    // converted to Postgres. Nothing below is yet — see SUPABASE_MIGRATION.md for exactly what's
+    // left and the plan for converting it, module by module. Rather than let an unconverted
+    // endpoint silently run against the local, unused SQLite database and return empty or wrong
+    // data (a real risk: it would look like a bug in the data, not a missing feature), refuse
+    // clearly here so that's impossible. This whole block does nothing in the offline install or
+    // any deployment without DATABASE_URL set — USE_POSTGRES is false there, same as always.
+    if (USE_POSTGRES) {
+      return sendJSON(res, 501, { error: 'This part of the system is not available yet in this Supabase/Postgres deployment — only login is converted so far. See SUPABASE_MIGRATION.md for progress. It works normally in the offline install.' });
+    }
+
     // Screen Lock — lets someone step away for a moment without needing to fully log back in.
     // Requires the user to already be logged in (this is not a pre-login/public endpoint);
     // unlocking only needs the short lock PIN, not the full account password.
