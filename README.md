@@ -1771,9 +1771,15 @@ depends on.
   Supabase project, same caveat as section 54: actually exercising it over a real `pg` connection
   needs Render or a developer machine, since this sandbox still can't install `pg`.
 
+Also converted **attendance** in the same pass: `GET /api/attendance` and
+`POST /api/attendance/bulk` (the daily present/absent marking and its upsert-per-student-per-day
+logic) now branch on `USE_POSTGRES`, with `school_id` added throughout and student self-scoping
+unchanged. Verified live in SQLite mode: marked attendance for a test student, listed it back
+filtered by class and by student, got identical results to before, cleaned up afterward.
+
 Updated `SUPABASE_MIGRATION.md` with the full details and an updated "what's left" list: next up
-is attendance, then results (`continuous_assessment`), then fee payments, then bus/canteen/
-communications/reports/audit/backup/settings.
+is results (`continuous_assessment`), then fee payments, then bus/canteen/staff
+attendance/communications/reports/audit/backup/settings.
 
 ## 56. Large features not yet built
 

@@ -54,6 +54,12 @@ not (SQLite) — see "What's done" below, this is now wired up for the endpoints
   `GET /api/students/:id`; class-teacher names on classes; class/subject/term names on
   `exam_schedule` and `live_class_rooms`). `isConvertedResourceRoute()` tells the Postgres-mode
   safety net to let these 22 resources' routes through while still blocking everything else.
+- **Attendance**: `GET /api/attendance` and `POST /api/attendance/bulk` (daily present/absent
+  marking, one upsert per student per day) now branch on `USE_POSTGRES` the same way — `school_id`
+  added to the insert/upsert and to every filter on the list query, student self-scoping
+  unchanged. `isConvertedResourceRoute()` now also exempts these two paths (they aren't part of
+  the generic `resources{}` dispatcher, since they don't follow the `/api/<resource>[/<id>]`
+  shape).
 - **Multi-school resolution for pre-login requests** (`resolveSchoolPg` in `server.js`): pass an
   explicit school slug (`?school=` on `public-settings`, `school` in the login request body), or
   if this deployment has exactly one school so far, it's picked automatically — so a single-school
@@ -131,12 +137,14 @@ ALTER TABLE public.schools ENABLE ROW LEVEL SECURITY;
    subjects, academic_years, terms, buses, fee_types, expenditures, weekly_targets, fees,
    grading_system, announcements, duty_roster, exam_schedule, live_class_rooms, class_groups,
    group_tasks, student_tasks, ges_schools, arabic_subjects) are done — that's full CRUD for the
-   core student/class/academic-setup data. Still ahead, module by module: attendance → results
+   core student/class/academic-setup data. Attendance (`GET /api/attendance`,
+   `POST /api/attendance/bulk`) is done too. Still ahead, module by module: results
    (`continuous_assessment`, the 3 remaining `gradeFor()` call sites) → fee payments (`fees` itself
    is converted, but `fee_payments` and the payment-recording endpoints aren't yet) → bus → canteen
-   → communications/forum/assignments → reports → audit log → backup/restore → settings. Each
-   module converted, then tested, before moving to the next — not a single big-bang pass, both for
-   safety and because it can only be partially verified without a live `DATABASE_URL` (see above).
+   → staff attendance/check-in → communications/forum/assignments → reports → audit log →
+   backup/restore → settings. Each module converted, then tested, before moving to the next — not
+   a single big-bang pass, both for safety and because it can only be partially verified without a
+   live `DATABASE_URL` (see above).
 2. **Decide on Row Level Security** (see above) — recommend enabling it with no policies, since
    this app doesn't need PostgREST access at all.
 3. **Run the server itself against a real `DATABASE_URL`** (Render, or a developer machine with

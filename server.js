@@ -1031,6 +1031,7 @@ const MODULE_FOR_RESOURCE = {
 // actually handles — used by the Postgres-mode safety net so the 22 resources converted there
 // are let through while everything else still gets the clear "not converted yet" response.
 function isConvertedResourceRoute(pathname) {
+  if (pathname === '/api/attendance' || pathname === '/api/attendance/bulk') return true;
   const segs = pathname.split('/').filter(Boolean);
   if (segs[0] !== 'api' || !resources[segs[1]]) return false;
   if (segs.length > 3) return false;
@@ -1131,7 +1132,8 @@ const server = http.createServer(async (req, res) => {
     // below) — students, teachers, staff, parents_guardians, classes, subjects, academic_years,
     // terms, buses, fee_types, expenditures, weekly_targets, fees, grading_system, announcements,
     // duty_roster, exam_schedule, live_class_rooms, class_groups, group_tasks, student_tasks,
-    // ges_schools, arabic_subjects. Everything else is not yet — see SUPABASE_MIGRATION.md.
+    // ges_schools, arabic_subjects — plus attendance (GET /api/attendance, POST
+    // /api/attendance/bulk). Everything else is not yet — see SUPABASE_MIGRATION.md.
     // Rather than let an unconverted endpoint silently run against the local, unused SQLite
     // database and return empty or wrong data (a real risk: it would look like a bug in the data,
     // not a missing feature), refuse clearly here so that's impossible. This whole block does
@@ -3329,23 +3331,50 @@ function parseCsvLine(line) {
     }
 
     if (pathname === '/api/attendance/bulk' && req.method === 'POST') {
-      const perms = getPermissions(currentUser.role_id, 'attendance');
+      const schoolIdAtt = USE_POSTGRES ? currentUser.school_id : null;
+      const perms = USE_POSTGRES
+        ? await getPermissionsPg(schoolIdAtt, currentUser.role_id, 'attendance')
+        : getPermissions(currentUser.role_id, 'attendance');
       if (!perms.can_add) return sendJSON(res, 403, { error: 'No permission' });
       const body = await readBody(req); // { date, class_id, records: [{student_id, status, remarks}] }
-      const stmt = db.prepare(`INSERT INTO attendance (student_id, class_id, date, status, remarks, marked_by)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status, remarks=excluded.remarks, class_id=excluded.class_id, marked_by=excluded.marked_by`);
-      for (const r of (body.records || [])) stmt.run(r.student_id, body.class_id, body.date, r.status, r.remarks || null, currentUser.id);
-      logAudit(currentUser, 'Mark attendance', 'attendance', { date: body.date, class_id: body.class_id, count: (body.records || []).length });
+      if (USE_POSTGRES) {
+        for (const r of (body.records || [])) {
+          await dbpg.query(
+            `INSERT INTO attendance (school_id, student_id, class_id, date, status, remarks, marked_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (student_id, date) DO UPDATE SET status=excluded.status, remarks=excluded.remarks, class_id=excluded.class_id, marked_by=excluded.marked_by`,
+            [schoolIdAtt, r.student_id, body.class_id, body.date, r.status, r.remarks || null, currentUser.id]
+          );
+        }
+        await dbpg.logAudit(schoolIdAtt, currentUser, 'Mark attendance', 'attendance', { date: body.date, class_id: body.class_id, count: (body.records || []).length });
+      } else {
+        const stmt = db.prepare(`INSERT INTO attendance (student_id, class_id, date, status, remarks, marked_by)
+          VALUES (?,?,?,?,?,?)
+          ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status, remarks=excluded.remarks, class_id=excluded.class_id, marked_by=excluded.marked_by`);
+        for (const r of (body.records || [])) stmt.run(r.student_id, body.class_id, body.date, r.status, r.remarks || null, currentUser.id);
+        logAudit(currentUser, 'Mark attendance', 'attendance', { date: body.date, class_id: body.class_id, count: (body.records || []).length });
+      }
       return sendJSON(res, 200, { ok: true });
     }
     if (pathname === '/api/attendance' && req.method === 'GET') {
-      const perms = getPermissions(currentUser.role_id, 'attendance');
+      const schoolIdAtt = USE_POSTGRES ? currentUser.school_id : null;
+      const perms = USE_POSTGRES
+        ? await getPermissionsPg(schoolIdAtt, currentUser.role_id, 'attendance')
+        : getPermissions(currentUser.role_id, 'attendance');
       if (!perms.can_view) return sendJSON(res, 403, { error: 'No permission' });
       let { date, class_id, student_id } = parsed.query;
       if (currentUser.role_name === 'Student') {
         if (!currentUser.linked_student_id) return sendJSON(res, 200, []);
         student_id = String(currentUser.linked_student_id); // force-scope: a student only ever sees their own attendance
+      }
+      if (USE_POSTGRES) {
+        let sql = `SELECT a.*, s.first_name, s.last_name, s.student_id as sid FROM attendance a JOIN students s ON s.id=a.student_id WHERE a.school_id=$1`;
+        const params = [schoolIdAtt];
+        if (date) { params.push(date); sql += ` AND a.date=$${params.length}`; }
+        if (class_id) { params.push(class_id); sql += ` AND a.class_id=$${params.length}`; }
+        if (student_id) { params.push(student_id); sql += ` AND a.student_id=$${params.length}`; }
+        sql += ' ORDER BY a.date DESC';
+        return sendJSON(res, 200, (await dbpg.query(sql, params)).rows);
       }
       let sql = `SELECT a.*, s.first_name, s.last_name, s.student_id as sid FROM attendance a JOIN students s ON s.id=a.student_id WHERE 1=1`;
       const params = [];
