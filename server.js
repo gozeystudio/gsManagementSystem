@@ -862,11 +862,34 @@ function serveStatic(req, res, pathname) {
   });
 }
 
-// Generic CRUD factory for straightforward tables
+// Generic CRUD factory for straightforward tables. Backend-aware: every method takes an
+// (optional, SQLite-mode-ignored) schoolId last, and runs the Postgres branch — with that
+// schoolId enforced on every single read/write — whenever USE_POSTGRES is set. The SQLite branch
+// below is completely unchanged from before this conversion.
 function crud(table, opts = {}) {
   const orderBy = opts.orderBy || 'id DESC';
   return {
-    list: (query) => {
+    list: async (query, schoolId) => {
+      if (USE_POSTGRES) {
+        const clauses = ['school_id = $1'];
+        const params = [schoolId];
+        if (opts.filters) {
+          for (const f of opts.filters) {
+            if (query[f]) { params.push(query[f]); clauses.push(`${f} = $${params.length}`); }
+          }
+        }
+        if (query.q && opts.searchFields) {
+          const ors = [];
+          opts.searchFields.forEach(f => { params.push(`%${query.q}%`); ors.push(`${f} ILIKE $${params.length}`); });
+          clauses.push('(' + ors.join(' OR ') + ')');
+        }
+        const baseSql = `FROM ${table} WHERE ${clauses.join(' AND ')}`;
+        const total = Number((await dbpg.query(`SELECT COUNT(*) c ${baseSql}`, params)).rows[0].c);
+        const page = parseInt(query.page) || 1;
+        const pageSize = Math.min(parseInt(query.pageSize) || 50, 500);
+        const { rows } = await dbpg.query(`SELECT * ${baseSql} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, params);
+        return { rows, total, page, pageSize };
+      }
       let sql = `SELECT * FROM ${table}`;
       const clauses = [];
       const params = [];
@@ -889,21 +912,44 @@ function crud(table, opts = {}) {
       const rows = db.prepare(sql).all(...params);
       return { rows, total, page, pageSize };
     },
-    get: (id) => db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),
-    create: (data) => {
+    get: async (id, schoolId) => {
+      if (USE_POSTGRES) {
+        const { rows } = await dbpg.query(`SELECT * FROM ${table} WHERE id=$1 AND school_id=$2`, [id, schoolId]);
+        return rows[0] || null;
+      }
+      return db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
+    },
+    create: async (data, schoolId) => {
+      if (USE_POSTGRES) {
+        const cols = Object.keys(data);
+        const allCols = ['school_id', ...cols];
+        const placeholders = allCols.map((_, i) => `$${i + 1}`).join(',');
+        const { rows } = await dbpg.query(`INSERT INTO ${table} (${allCols.join(',')}) VALUES (${placeholders}) RETURNING *`, [schoolId, ...cols.map(c => data[c])]);
+        return rows[0];
+      }
       const cols = Object.keys(data);
       const stmt = db.prepare(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
       const info = stmt.run(...cols.map(c => data[c]));
       return db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(Number(info.lastInsertRowid));
     },
-    update: (id, data) => {
+    update: async (id, data, schoolId) => {
+      if (USE_POSTGRES) {
+        const cols = Object.keys(data);
+        if (!cols.length) return (await dbpg.query(`SELECT * FROM ${table} WHERE id=$1 AND school_id=$2`, [id, schoolId])).rows[0];
+        const setClause = cols.map((c, i) => `${c}=$${i + 1}`).join(',');
+        const { rows } = await dbpg.query(`UPDATE ${table} SET ${setClause} WHERE id=$${cols.length + 1} AND school_id=$${cols.length + 2} RETURNING *`, [...cols.map(c => data[c]), id, schoolId]);
+        return rows[0];
+      }
       const cols = Object.keys(data);
       if (!cols.length) return db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
       const stmt = db.prepare(`UPDATE ${table} SET ${cols.map(c => `${c}=?`).join(',')} WHERE id=?`);
       stmt.run(...cols.map(c => data[c]), id);
       return db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
     },
-    delete: (id) => { db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); return { deleted: true }; }
+    delete: async (id, schoolId) => {
+      if (USE_POSTGRES) { await dbpg.query(`DELETE FROM ${table} WHERE id=$1 AND school_id=$2`, [id, schoolId]); return { deleted: true }; }
+      db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); return { deleted: true };
+    }
   };
 }
 
@@ -981,6 +1027,16 @@ const MODULE_FOR_RESOURCE = {
   ges_schools: 'students',
   arabic_subjects: 'results',
 };
+// Whether a request path is one the generic `/api/<resource>[/<id>]` dispatcher (further below)
+// actually handles — used by the Postgres-mode safety net so the 22 resources converted there
+// are let through while everything else still gets the clear "not converted yet" response.
+function isConvertedResourceRoute(pathname) {
+  const segs = pathname.split('/').filter(Boolean);
+  if (segs[0] !== 'api' || !resources[segs[1]]) return false;
+  if (segs.length > 3) return false;
+  if (segs.length === 3 && !/^\d+$/.test(segs[2])) return false;
+  return true;
+}
 
 // ---------- Request handler ----------
 const server = http.createServer(async (req, res) => {
@@ -1070,15 +1126,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ---- Postgres-mode safety net ----
-    // Everything above this point (login, logout, public-settings, currentUser resolution) is
-    // converted to Postgres. Nothing below is yet — see SUPABASE_MIGRATION.md for exactly what's
-    // left and the plan for converting it, module by module. Rather than let an unconverted
-    // endpoint silently run against the local, unused SQLite database and return empty or wrong
-    // data (a real risk: it would look like a bug in the data, not a missing feature), refuse
-    // clearly here so that's impossible. This whole block does nothing in the offline install or
-    // any deployment without DATABASE_URL set — USE_POSTGRES is false there, same as always.
-    if (USE_POSTGRES) {
-      return sendJSON(res, 501, { error: 'This part of the system is not available yet in this Supabase/Postgres deployment — only login is converted so far. See SUPABASE_MIGRATION.md for progress. It works normally in the offline install.' });
+    // Converted so far: login, logout, public-settings, currentUser resolution (above), and the
+    // generic /api/<resource>[/<id>] dispatcher for the 22 resources in `resources{}` (further
+    // below) — students, teachers, staff, parents_guardians, classes, subjects, academic_years,
+    // terms, buses, fee_types, expenditures, weekly_targets, fees, grading_system, announcements,
+    // duty_roster, exam_schedule, live_class_rooms, class_groups, group_tasks, student_tasks,
+    // ges_schools, arabic_subjects. Everything else is not yet — see SUPABASE_MIGRATION.md.
+    // Rather than let an unconverted endpoint silently run against the local, unused SQLite
+    // database and return empty or wrong data (a real risk: it would look like a bug in the data,
+    // not a missing feature), refuse clearly here so that's impossible. This whole block does
+    // nothing in the offline install or any deployment without DATABASE_URL set.
+    if (USE_POSTGRES && !isConvertedResourceRoute(pathname)) {
+      return sendJSON(res, 501, { error: 'This part of the system is not available yet in this Supabase/Postgres deployment. See SUPABASE_MIGRATION.md for progress. It works normally in the offline install.' });
     }
 
     // Screen Lock — lets someone step away for a moment without needing to fully log back in.
@@ -2904,7 +2963,10 @@ function parseCsvLine(line) {
     const segs = pathname.split('/').filter(Boolean); // ['api','students','5']
     const resourceName = segs[1];
     if (resources[resourceName]) {
-      const perms = getPermissions(currentUser.role_id, MODULE_FOR_RESOURCE[resourceName] || resourceName);
+      const schoolId = USE_POSTGRES ? currentUser.school_id : null;
+      const perms = USE_POSTGRES
+        ? await getPermissionsPg(schoolId, currentUser.role_id, MODULE_FOR_RESOURCE[resourceName] || resourceName)
+        : getPermissions(currentUser.role_id, MODULE_FOR_RESOURCE[resourceName] || resourceName);
       const id = segs[2] ? Number(segs[2]) : null;
 
       if (req.method === 'GET' && !perms.can_view) return sendJSON(res, 403, { error: 'No view permission' });
@@ -2931,14 +2993,17 @@ function parseCsvLine(line) {
       // A Parent/Guardian only ever sees their own linked ward(s) — never the full student
       // list, and never another family's child, even by guessing an id in the URL.
       if (currentUser.role_name === 'Parent/Guardian' && currentUser.linked_parent_id) {
-        const myChildIds = db.prepare('SELECT student_id FROM student_parents WHERE parent_id=?').all(currentUser.linked_parent_id).map(r => r.student_id);
+        const myChildIds = USE_POSTGRES
+          ? (await dbpg.query('SELECT student_id FROM student_parents WHERE parent_id=$1 AND school_id=$2', [currentUser.linked_parent_id, schoolId])).rows.map(r => r.student_id)
+          : db.prepare('SELECT student_id FROM student_parents WHERE parent_id=?').all(currentUser.linked_parent_id).map(r => r.student_id);
         if (resourceName === 'students') {
           if (id) {
             if (!myChildIds.includes(id)) return sendJSON(res, 403, { error: 'You can only view your own ward\'s record.' });
           } else if (req.method === 'GET') {
             if (!myChildIds.length) return sendJSON(res, 200, { rows: [], total: 0, page: 1, pageSize: 0 });
-            const placeholders = myChildIds.map(() => '?').join(',');
-            const rows = db.prepare(`SELECT * FROM students WHERE id IN (${placeholders}) ORDER BY id DESC`).all(...myChildIds);
+            const rows = USE_POSTGRES
+              ? (await dbpg.query('SELECT * FROM students WHERE id = ANY($1) AND school_id=$2 ORDER BY id DESC', [myChildIds, schoolId])).rows
+              : db.prepare(`SELECT * FROM students WHERE id IN (${myChildIds.map(() => '?').join(',')}) ORDER BY id DESC`).all(...myChildIds);
             return sendJSON(res, 200, { rows, total: rows.length, page: 1, pageSize: rows.length });
           }
         }
@@ -2971,7 +3036,9 @@ function parseCsvLine(line) {
           parsed.query.class_teacher_id = String(currentUser.linked_teacher_id);
         }
         if (resourceName === 'students' && req.method === 'GET' && !id) {
-          const myClassIds = db.prepare('SELECT id FROM classes WHERE class_teacher_id=?').all(currentUser.linked_teacher_id).map(c => c.id);
+          const myClassIds = USE_POSTGRES
+            ? (await dbpg.query('SELECT id FROM classes WHERE class_teacher_id=$1 AND school_id=$2', [currentUser.linked_teacher_id, schoolId])).rows.map(c => c.id)
+            : db.prepare('SELECT id FROM classes WHERE class_teacher_id=?').all(currentUser.linked_teacher_id).map(c => c.id);
           if (!myClassIds.length) return sendJSON(res, 200, { rows: [], total: 0, page: 1, pageSize: 0 });
           // A specific class_id in the query is only honored if it's actually one of theirs —
           // otherwise this falls back to listing every student across all of their classes.
@@ -2979,48 +3046,69 @@ function parseCsvLine(line) {
             return sendJSON(res, 200, { rows: [], total: 0, page: 1, pageSize: 0 });
           }
           if (!parsed.query.class_id) {
-            const placeholders = myClassIds.map(() => '?').join(',');
-            const rows = db.prepare(`SELECT * FROM students WHERE class_id IN (${placeholders}) ORDER BY id DESC`).all(...myClassIds);
+            const rows = USE_POSTGRES
+              ? (await dbpg.query('SELECT * FROM students WHERE class_id = ANY($1) AND school_id=$2 ORDER BY id DESC', [myClassIds, schoolId])).rows
+              : db.prepare(`SELECT * FROM students WHERE class_id IN (${myClassIds.map(() => '?').join(',')}) ORDER BY id DESC`).all(...myClassIds);
             return sendJSON(res, 200, { rows, total: rows.length, page: 1, pageSize: rows.length });
           }
         }
       }
 
       if (req.method === 'GET' && id) {
-        const row = resources[resourceName].get(id);
+        const row = await resources[resourceName].get(id, schoolId);
         if (!row) return sendJSON(res, 404, { error: 'Not found' });
         // attach relations for students
         if (resourceName === 'students') {
-          row.parents = db.prepare(`SELECT pg.* FROM parents_guardians pg JOIN student_parents sp ON sp.parent_id=pg.id WHERE sp.student_id=?`).all(id);
-          row.attendance = db.prepare('SELECT * FROM attendance WHERE student_id=? ORDER BY date DESC LIMIT 60').all(id);
-          row.results = db.prepare('SELECT ca.*, s.name as subject_name FROM continuous_assessment ca JOIN subjects s ON s.id=ca.subject_id WHERE ca.student_id=? ORDER BY ca.id DESC').all(id)
-            .map(r => { const c = computeCA(r); const g = gradeFor(c.final_score); return { ...r, ...c, grade: g ? g.grade : '-' }; });
-          row.fees = db.prepare(`SELECT f.*, ft.name as fee_type_name, t.name as term_name,
-              COALESCE((SELECT SUM(amount_paid) FROM fee_payments WHERE fee_id=f.id), 0) as amount_paid
-            FROM fees f JOIN fee_types ft ON ft.id=f.fee_type_id LEFT JOIN terms t ON t.id=f.term_id WHERE f.student_id=?`).all(id);
-          // Login info is only meaningful for staff-level roles — a student viewing their own
-          // record doesn't need their own username surfaced back at them here.
-          if (currentUser.role_name !== 'Student') {
-            const user = db.prepare('SELECT username, status FROM users WHERE linked_student_id=?').get(id);
-            row.login = user ? { username: user.username, status: user.status } : null;
+          if (USE_POSTGRES) {
+            row.parents = (await dbpg.query(`SELECT pg.* FROM parents_guardians pg JOIN student_parents sp ON sp.parent_id=pg.id WHERE sp.student_id=$1 AND sp.school_id=$2`, [id, schoolId])).rows;
+            row.attendance = (await dbpg.query('SELECT * FROM attendance WHERE student_id=$1 AND school_id=$2 ORDER BY date DESC LIMIT 60', [id, schoolId])).rows;
+            const caRows = (await dbpg.query('SELECT ca.*, s.name as subject_name FROM continuous_assessment ca JOIN subjects s ON s.id=ca.subject_id WHERE ca.student_id=$1 AND ca.school_id=$2 ORDER BY ca.id DESC', [id, schoolId])).rows;
+            const gradingRows = (await dbpg.query('SELECT * FROM grading_system WHERE school_id=$1 ORDER BY min_score DESC', [schoolId])).rows;
+            row.results = caRows.map(r => { const c = computeCA(r); const g = gradingRows.find(gr => c.final_score >= gr.min_score && c.final_score <= gr.max_score); return { ...r, ...c, grade: g ? g.grade : '-' }; });
+            row.fees = (await dbpg.query(`SELECT f.*, ft.name as fee_type_name, t.name as term_name,
+                COALESCE((SELECT SUM(amount_paid) FROM fee_payments WHERE fee_id=f.id AND school_id=$2), 0) as amount_paid
+              FROM fees f JOIN fee_types ft ON ft.id=f.fee_type_id LEFT JOIN terms t ON t.id=f.term_id WHERE f.student_id=$1 AND f.school_id=$2`, [id, schoolId])).rows;
+            if (currentUser.role_name !== 'Student') {
+              const userRows = (await dbpg.query('SELECT username, status FROM users WHERE linked_student_id=$1 AND school_id=$2', [id, schoolId])).rows;
+              row.login = userRows[0] ? { username: userRows[0].username, status: userRows[0].status } : null;
+            }
+          } else {
+            row.parents = db.prepare(`SELECT pg.* FROM parents_guardians pg JOIN student_parents sp ON sp.parent_id=pg.id WHERE sp.student_id=?`).all(id);
+            row.attendance = db.prepare('SELECT * FROM attendance WHERE student_id=? ORDER BY date DESC LIMIT 60').all(id);
+            row.results = db.prepare('SELECT ca.*, s.name as subject_name FROM continuous_assessment ca JOIN subjects s ON s.id=ca.subject_id WHERE ca.student_id=? ORDER BY ca.id DESC').all(id)
+              .map(r => { const c = computeCA(r); const g = gradeFor(c.final_score); return { ...r, ...c, grade: g ? g.grade : '-' }; });
+            row.fees = db.prepare(`SELECT f.*, ft.name as fee_type_name, t.name as term_name,
+                COALESCE((SELECT SUM(amount_paid) FROM fee_payments WHERE fee_id=f.id), 0) as amount_paid
+              FROM fees f JOIN fee_types ft ON ft.id=f.fee_type_id LEFT JOIN terms t ON t.id=f.term_id WHERE f.student_id=?`).all(id);
+            // Login info is only meaningful for staff-level roles — a student viewing their own
+            // record doesn't need their own username surfaced back at them here.
+            if (currentUser.role_name !== 'Student') {
+              const user = db.prepare('SELECT username, status FROM users WHERE linked_student_id=?').get(id);
+              row.login = user ? { username: user.username, status: user.status } : null;
+            }
           }
         }
         if (resourceName === 'classes' && row.class_teacher_id) {
-          const t = db.prepare('SELECT full_name FROM teachers WHERE id=?').get(row.class_teacher_id);
+          const t = USE_POSTGRES
+            ? (await dbpg.query('SELECT full_name FROM teachers WHERE id=$1 AND school_id=$2', [row.class_teacher_id, schoolId])).rows[0]
+            : db.prepare('SELECT full_name FROM teachers WHERE id=?').get(row.class_teacher_id);
           row.class_teacher_name = t ? t.full_name : null;
         }
         return sendJSON(res, 200, row);
       }
       if (req.method === 'GET') {
-        const listResult = resources[resourceName].list(parsed.query);
+        const listResult = await resources[resourceName].list(parsed.query, schoolId);
         if (currentUser.role_name === 'Arabic Head Teacher' && resourceName === 'teachers' && !id) {
           listResult.rows = listResult.rows.filter(t => t.teaching_language === 'Arabic' || t.teaching_language === 'Both');
         }
-        if (resourceName === 'classes') {
+        if (resourceName === 'classes' && listResult.rows.length) {
           const teacherIds = [...new Set(listResult.rows.map(c => c.class_teacher_id).filter(Boolean))];
           if (teacherIds.length) {
             const teacherNames = {};
-            db.prepare(`SELECT id, full_name FROM teachers WHERE id IN (${teacherIds.map(() => '?').join(',')})`).all(...teacherIds).forEach(t => { teacherNames[t.id] = t.full_name; });
+            const trows = USE_POSTGRES
+              ? (await dbpg.query(`SELECT id, full_name FROM teachers WHERE id = ANY($1) AND school_id=$2`, [teacherIds, schoolId])).rows
+              : db.prepare(`SELECT id, full_name FROM teachers WHERE id IN (${teacherIds.map(() => '?').join(',')})`).all(...teacherIds);
+            trows.forEach(t => { teacherNames[t.id] = t.full_name; });
             listResult.rows.forEach(c => { c.class_teacher_name = c.class_teacher_id ? (teacherNames[c.class_teacher_id] || null) : null; });
           }
         }
@@ -3030,16 +3118,27 @@ function parseCsvLine(line) {
           if (currentUser.role_name === 'Student') {
             if (!currentUser.linked_student_id) { listResult.rows = []; }
             else {
-              const student = db.prepare('SELECT class_id FROM students WHERE id=?').get(currentUser.linked_student_id);
+              const student = USE_POSTGRES
+                ? (await dbpg.query('SELECT class_id FROM students WHERE id=$1 AND school_id=$2', [currentUser.linked_student_id, schoolId])).rows[0]
+                : db.prepare('SELECT class_id FROM students WHERE id=?').get(currentUser.linked_student_id);
               listResult.rows = listResult.rows.filter(r => r.class_id === (student ? student.class_id : -1));
             }
           }
-          listResult.rows.forEach(r => {
-            const c = db.prepare('SELECT name FROM classes WHERE id=?').get(r.class_id);
-            const s = db.prepare('SELECT name FROM subjects WHERE id=?').get(r.subject_id);
-            const t = r.term_id ? db.prepare('SELECT name FROM terms WHERE id=?').get(r.term_id) : null;
-            r.class_name = c ? c.name : null; r.subject_name = s ? s.name : null; r.term_name = t ? t.name : null;
-          });
+          if (USE_POSTGRES) {
+            for (const r of listResult.rows) {
+              const c = (await dbpg.query('SELECT name FROM classes WHERE id=$1 AND school_id=$2', [r.class_id, schoolId])).rows[0];
+              const s = (await dbpg.query('SELECT name FROM subjects WHERE id=$1 AND school_id=$2', [r.subject_id, schoolId])).rows[0];
+              const t = r.term_id ? (await dbpg.query('SELECT name FROM terms WHERE id=$1 AND school_id=$2', [r.term_id, schoolId])).rows[0] : null;
+              r.class_name = c ? c.name : null; r.subject_name = s ? s.name : null; r.term_name = t ? t.name : null;
+            }
+          } else {
+            listResult.rows.forEach(r => {
+              const c = db.prepare('SELECT name FROM classes WHERE id=?').get(r.class_id);
+              const s = db.prepare('SELECT name FROM subjects WHERE id=?').get(r.subject_id);
+              const t = r.term_id ? db.prepare('SELECT name FROM terms WHERE id=?').get(r.term_id) : null;
+              r.class_name = c ? c.name : null; r.subject_name = s ? s.name : null; r.term_name = t ? t.name : null;
+            });
+          }
         }
         if (resourceName === 'live_class_rooms') {
           // A Student only ever sees rooms for their own class; a Teacher sees only rooms they
@@ -3047,18 +3146,29 @@ function parseCsvLine(line) {
           if (currentUser.role_name === 'Student') {
             if (!currentUser.linked_student_id) { listResult.rows = []; }
             else {
-              const student = db.prepare('SELECT class_id FROM students WHERE id=?').get(currentUser.linked_student_id);
+              const student = USE_POSTGRES
+                ? (await dbpg.query('SELECT class_id FROM students WHERE id=$1 AND school_id=$2', [currentUser.linked_student_id, schoolId])).rows[0]
+                : db.prepare('SELECT class_id FROM students WHERE id=?').get(currentUser.linked_student_id);
               listResult.rows = listResult.rows.filter(r => r.class_id === (student ? student.class_id : -1));
             }
           } else if (currentUser.role_name === 'Teacher' && currentUser.linked_teacher_id) {
             listResult.rows = listResult.rows.filter(r => r.teacher_id === currentUser.linked_teacher_id);
           }
-          listResult.rows.forEach(r => {
-            const c = db.prepare('SELECT name FROM classes WHERE id=?').get(r.class_id);
-            const sub = r.subject_id ? db.prepare('SELECT name FROM subjects WHERE id=?').get(r.subject_id) : null;
-            const t = db.prepare('SELECT full_name FROM teachers WHERE id=?').get(r.teacher_id);
-            r.class_name = c ? c.name : null; r.subject_name = sub ? sub.name : null; r.teacher_name = t ? t.full_name : null;
-          });
+          if (USE_POSTGRES) {
+            for (const r of listResult.rows) {
+              const c = (await dbpg.query('SELECT name FROM classes WHERE id=$1 AND school_id=$2', [r.class_id, schoolId])).rows[0];
+              const sub = r.subject_id ? (await dbpg.query('SELECT name FROM subjects WHERE id=$1 AND school_id=$2', [r.subject_id, schoolId])).rows[0] : null;
+              const t = (await dbpg.query('SELECT full_name FROM teachers WHERE id=$1 AND school_id=$2', [r.teacher_id, schoolId])).rows[0];
+              r.class_name = c ? c.name : null; r.subject_name = sub ? sub.name : null; r.teacher_name = t ? t.full_name : null;
+            }
+          } else {
+            listResult.rows.forEach(r => {
+              const c = db.prepare('SELECT name FROM classes WHERE id=?').get(r.class_id);
+              const sub = r.subject_id ? db.prepare('SELECT name FROM subjects WHERE id=?').get(r.subject_id) : null;
+              const t = db.prepare('SELECT full_name FROM teachers WHERE id=?').get(r.teacher_id);
+              r.class_name = c ? c.name : null; r.subject_name = sub ? sub.name : null; r.teacher_name = t ? t.full_name : null;
+            });
+          }
         }
         return sendJSON(res, 200, listResult);
       }
@@ -3081,24 +3191,35 @@ function parseCsvLine(line) {
         // Auto-generate human-readable IDs so staff never have to invent or type them.
         // The prefix and digit-padding are configurable in Settings > ID Format.
         if (resourceName === 'students' || resourceName === 'teachers' || resourceName === 'staff') {
-          const idSettings = db.prepare('SELECT student_id_prefix, staff_id_prefix, id_seq_digits FROM school_settings WHERE id=1').get();
+          const idSettings = USE_POSTGRES
+            ? (await dbpg.query('SELECT student_id_prefix, staff_id_prefix, id_seq_digits FROM school_settings WHERE school_id=$1', [schoolId])).rows[0]
+            : db.prepare('SELECT student_id_prefix, staff_id_prefix, id_seq_digits FROM school_settings WHERE id=1').get();
           const digits = (idSettings && idSettings.id_seq_digits) || 3;
           if (resourceName === 'students') {
             const year = (body.admission_date && new Date(body.admission_date).getFullYear()) || new Date().getFullYear();
-            const newId = generateSequentialId((idSettings && idSettings.student_id_prefix) || 'NIB', 'student', year, digits);
+            const newId = USE_POSTGRES
+              ? await dbpg.generateSequentialId(schoolId, (idSettings && idSettings.student_id_prefix) || 'NIB', 'student', year, digits)
+              : generateSequentialId((idSettings && idSettings.student_id_prefix) || 'NIB', 'student', year, digits);
             body.student_id = newId;
             body.admission_number = newId; // Admission Number mirrors the Student ID, as requested.
           } else {
             const year = (body.employment_date && new Date(body.employment_date).getFullYear()) || new Date().getFullYear();
-            body.staff_id = generateSequentialId((idSettings && idSettings.staff_id_prefix) || 'ST', 'staff', year, digits); // shared counter so teacher & staff IDs never collide
+            body.staff_id = USE_POSTGRES
+              ? await dbpg.generateSequentialId(schoolId, (idSettings && idSettings.staff_id_prefix) || 'ST', 'staff', year, digits)
+              : generateSequentialId((idSettings && idSettings.staff_id_prefix) || 'ST', 'staff', year, digits); // shared counter so teacher & staff IDs never collide
           }
         }
-        const row = resources[resourceName].create(body);
+        const row = await resources[resourceName].create(body, schoolId);
         if (resourceName === 'students' && Array.isArray(parentIds)) {
-          const ins = db.prepare('INSERT OR IGNORE INTO student_parents (student_id, parent_id) VALUES (?,?)');
-          parentIds.forEach(pid => ins.run(row.id, pid));
+          if (USE_POSTGRES) {
+            for (const pid of parentIds) await dbpg.query('INSERT INTO student_parents (school_id, student_id, parent_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [schoolId, row.id, pid]);
+          } else {
+            const ins = db.prepare('INSERT OR IGNORE INTO student_parents (student_id, parent_id) VALUES (?,?)');
+            parentIds.forEach(pid => ins.run(row.id, pid));
+          }
         }
-        logAudit(currentUser, 'Create', resourceName, { id: row.id });
+        if (USE_POSTGRES) await dbpg.logAudit(schoolId, currentUser, 'Create', resourceName, { id: row.id });
+        else logAudit(currentUser, 'Create', resourceName, { id: row.id });
         return sendJSON(res, 201, row);
       }
       if (req.method === 'PUT' && id) {
@@ -3107,31 +3228,38 @@ function parseCsvLine(line) {
         // Auto-generated IDs are permanent once assigned — never let an edit change them.
         delete body.student_id; delete body.admission_number; delete body.staff_id;
         if (body.photo_data) {
-          const existingForPhoto = resources[resourceName].get(id);
+          const existingForPhoto = await resources[resourceName].get(id, schoolId);
           try { body.photo = savePhotoFromDataUrl(body.photo_data, resourceName); }
           catch (e) { return sendJSON(res, 400, { error: e.message }); }
           delete body.photo_data;
           if (existingForPhoto && existingForPhoto.photo) deletePhotoFile(existingForPhoto.photo);
         }
         if (body.attachment_data) {
-          const existingForAttachment = resources[resourceName].get(id);
+          const existingForAttachment = await resources[resourceName].get(id, schoolId);
           try { body.attachment = saveAttachmentFromDataUrl(body.attachment_data, body.attachment_name); }
           catch (e) { return sendJSON(res, 400, { error: e.message }); }
           delete body.attachment_data;
           if (existingForAttachment && existingForAttachment.attachment) deletePhotoFile(existingForAttachment.attachment);
         }
-        const row = resources[resourceName].update(id, body);
+        const row = await resources[resourceName].update(id, body, schoolId);
         if (resourceName === 'students' && Array.isArray(parentIds)) {
-          db.prepare('DELETE FROM student_parents WHERE student_id=?').run(id);
-          const ins = db.prepare('INSERT OR IGNORE INTO student_parents (student_id, parent_id) VALUES (?,?)');
-          parentIds.forEach(pid => ins.run(id, pid));
+          if (USE_POSTGRES) {
+            await dbpg.query('DELETE FROM student_parents WHERE student_id=$1 AND school_id=$2', [id, schoolId]);
+            for (const pid of parentIds) await dbpg.query('INSERT INTO student_parents (school_id, student_id, parent_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [schoolId, id, pid]);
+          } else {
+            db.prepare('DELETE FROM student_parents WHERE student_id=?').run(id);
+            const ins = db.prepare('INSERT OR IGNORE INTO student_parents (student_id, parent_id) VALUES (?,?)');
+            parentIds.forEach(pid => ins.run(id, pid));
+          }
         }
-        logAudit(currentUser, 'Update', resourceName, { id });
+        if (USE_POSTGRES) await dbpg.logAudit(schoolId, currentUser, 'Update', resourceName, { id });
+        else logAudit(currentUser, 'Update', resourceName, { id });
         return sendJSON(res, 200, row);
       }
       if (req.method === 'DELETE' && id) {
-        resources[resourceName].delete(id);
-        logAudit(currentUser, 'Delete', resourceName, { id });
+        await resources[resourceName].delete(id, schoolId);
+        if (USE_POSTGRES) await dbpg.logAudit(schoolId, currentUser, 'Delete', resourceName, { id });
+        else logAudit(currentUser, 'Delete', resourceName, { id });
         return sendJSON(res, 200, { deleted: true });
       }
     }

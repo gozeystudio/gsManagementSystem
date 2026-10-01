@@ -39,6 +39,21 @@ not (SQLite) — see "What's done" below, this is now wired up for the endpoints
   session → current-user resolution (every request), and public branding
   (`GET /api/public-settings`, what the login screen reads before anyone signs in). Sessions now
   carry a `schoolId` alongside the `userId` they always carried.
+- **The generic resource dispatcher — 22 resource tables at once**: the app has a single
+  `crud(table, opts)` factory plus a `resources = { ... }` config object that generates full
+  list/get/create/update/delete handlers for 22 tables, all served through one
+  `/api/<resource>[/<id>]` dispatcher. Converting that one factory and that one dispatcher block
+  (instead of converting each table's handler separately) lit up full CRUD, in both backends, for:
+  `students`, `teachers`, `staff`, `parents_guardians`, `classes`, `subjects`, `academic_years`,
+  `terms`, `buses`, `fee_types`, `expenditures`, `weekly_targets`, `fees`, `grading_system`,
+  `announcements`, `duty_roster`, `exam_schedule`, `live_class_rooms`, `class_groups`,
+  `group_tasks`, `student_tasks`, `ges_schools`, `arabic_subjects`. This includes the role-scoping
+  rules (a Student only sees their own record; a Parent/Guardian only their own ward(s); a Teacher
+  only their own classes/students; an Arabic Head Teacher only Arabic-teaching staff at their
+  level) and the relation/enrichment lookups (a student's parents/attendance/results/fees/login on
+  `GET /api/students/:id`; class-teacher names on classes; class/subject/term names on
+  `exam_schedule` and `live_class_rooms`). `isConvertedResourceRoute()` tells the Postgres-mode
+  safety net to let these 22 resources' routes through while still blocking everything else.
 - **Multi-school resolution for pre-login requests** (`resolveSchoolPg` in `server.js`): pass an
   explicit school slug (`?school=` on `public-settings`, `school` in the login request body), or
   if this deployment has exactly one school so far, it's picked automatically — so a single-school
@@ -63,7 +78,13 @@ Three different things had to be verified, and they needed different methods:
 2. **Does `server.js` behave identically offline when `DATABASE_URL` is unset?** Yes — ran the
    live server with no `DATABASE_URL`, logged in, fetched public-settings, fetched an ordinary
    settings endpoint: all three worked exactly as before, and the new Postgres-mode code paths
-   were never even reached (`USE_POSTGRES` is `false`).
+   were never even reached (`USE_POSTGRES` is `false`). Re-verified after the 22-resource
+   dispatcher conversion: full create → get → update → list → delete round-trips against
+   `classes` and `students` (including the parents/attendance/results/fees/login relation
+   attachment on a student's `GET /api/students/:id`), plus list checks on `grading_system`,
+   `exam_schedule`, `live_class_rooms`, `arabic_subjects`, and `ges_schools` — all byte-identical
+   to pre-conversion behavior, and the test rows were deleted afterward, leaving the database
+   clean (`students` and `classes` both back to `0` rows).
 3. **Does the actual `db-postgres.js`/new `server.js` Postgres-mode code work over a real `pg`
    connection, end-to-end, over HTTP?** **Still not verified — same blocker as before**: this
    sandbox's network egress blocks the npm registry (`npm install pg` fails with
@@ -104,13 +125,18 @@ ALTER TABLE public.schools ENABLE ROW LEVEL SECURITY;
 
 ## What's left
 
-1. **Convert the remaining ~119 endpoints / ~440 database calls** in `server.js` from synchronous
-   SQLite (`db.prepare(...).get()`) to async Postgres (`await dbpg.query(...)`, with `school_id`
-   added to every query) — the large remaining piece of work, module by module: students → classes
-   → attendance → results next (the core academic flow), then fees → bus → canteen, then
-   communications/forum/assignments, then the rest. Each module converted, then tested, before
-   moving to the next — not a single big-bang pass, both for safety and because it can only be
-   partially verified without a live `DATABASE_URL` (see above).
+1. **Convert the remaining endpoints** in `server.js` from synchronous SQLite (`db.prepare(...).get()`)
+   to async Postgres (`await dbpg.query(...)`, with `school_id` added to every query). Auth and the
+   22-table generic resource dispatcher (students, teachers, staff, parents_guardians, classes,
+   subjects, academic_years, terms, buses, fee_types, expenditures, weekly_targets, fees,
+   grading_system, announcements, duty_roster, exam_schedule, live_class_rooms, class_groups,
+   group_tasks, student_tasks, ges_schools, arabic_subjects) are done — that's full CRUD for the
+   core student/class/academic-setup data. Still ahead, module by module: attendance → results
+   (`continuous_assessment`, the 3 remaining `gradeFor()` call sites) → fee payments (`fees` itself
+   is converted, but `fee_payments` and the payment-recording endpoints aren't yet) → bus → canteen
+   → communications/forum/assignments → reports → audit log → backup/restore → settings. Each
+   module converted, then tested, before moving to the next — not a single big-bang pass, both for
+   safety and because it can only be partially verified without a live `DATABASE_URL` (see above).
 2. **Decide on Row Level Security** (see above) — recommend enabling it with no policies, since
    this app doesn't need PostgREST access at all.
 3. **Run the server itself against a real `DATABASE_URL`** (Render, or a developer machine with

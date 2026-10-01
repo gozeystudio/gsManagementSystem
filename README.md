@@ -1734,7 +1734,48 @@ Postgres directly, same blocker noted in `SUPABASE_MIGRATION.md`). Every other e
 needs converting, in the order laid out there. The offline install and the existing SQLite-backed
 Render deployment are both completely unaffected either way.
 
-## 55. Large features not yet built
+## 55. Converted the Core Student/Class Data to Postgres: 22 Resources at Once
+
+Continued the module-by-module Supabase/Postgres conversion from section 54. The codebase turned
+out to already have a shortcut built in: a single generic `crud(table, opts)` factory and a
+`resources = { ... }` config object generate full list/get/create/update/delete handlers for 22
+tables, all served through one `/api/<resource>[/<id>]` dispatcher — so converting that one
+factory and that one ~240-line dispatcher block, instead of converting each table's handler one at
+a time, lit up full CRUD for 22 resources in a single pass: `students`, `teachers`, `staff`,
+`parents_guardians`, `classes`, `subjects`, `academic_years`, `terms`, `buses`, `fee_types`,
+`expenditures`, `weekly_targets`, `fees`, `grading_system`, `announcements`, `duty_roster`,
+`exam_schedule`, `live_class_rooms`, `class_groups`, `group_tasks`, `student_tasks`,
+`ges_schools`, `arabic_subjects` — the core student/class/academic-setup data the rest of the app
+depends on.
+
+- **The `crud()` factory is now backend-aware**: every method takes a trailing `schoolId`; the
+  Postgres branch uses `$N` placeholders, scopes every query by `school_id`, and uses
+  `RETURNING *`; the SQLite branch is untouched, byte-for-byte.
+- **All of the role-scoping rules carried over to both backends**: a Student only ever sees their
+  own record; a Parent/Guardian only their own linked ward(s), never another family's child even
+  by guessing an id; a Teacher only the classes they're assigned to and the students within them;
+  an Arabic Head Teacher only Arabic-teaching staff at their own level.
+- **All of the relation and enrichment lookups carried over too**: a student's
+  parents/attendance/results/fees/login on `GET /api/students/:id`; a class's teacher name; class,
+  subject, and term names attached to `exam_schedule` and `live_class_rooms` rows, including their
+  own student/teacher-scoped visibility rules.
+- **Added `isConvertedResourceRoute()`**, so the "not converted yet" safety net from section 54
+  now correctly lets these 22 resources' routes through in Postgres mode, while every other
+  not-yet-converted endpoint still gets the clear `501`.
+- **Verified live in SQLite mode** (the one thing this sandbox can fully test): ran real
+  create → get → update → list → delete round-trips through the actual running server against
+  `classes` and `students` — including the full relation attachment on a student record — plus
+  list checks on `grading_system`, `exam_schedule`, `live_class_rooms`, `arabic_subjects`, and
+  `ges_schools`. Everything behaved exactly as it did before this conversion, and the test data was
+  cleaned up afterward. The Postgres branch is schema- and logic-verified against the live
+  Supabase project, same caveat as section 54: actually exercising it over a real `pg` connection
+  needs Render or a developer machine, since this sandbox still can't install `pg`.
+
+Updated `SUPABASE_MIGRATION.md` with the full details and an updated "what's left" list: next up
+is attendance, then results (`continuous_assessment`), then fee payments, then bus/canteen/
+communications/reports/audit/backup/settings.
+
+## 56. Large features not yet built
 
 A few requested features are substantial standalone modules that deserve a proper, dedicated
 build rather than being rushed in alongside everything else. These are not started:
